@@ -6,3 +6,4 @@ langchain
 beautifulsoup4
 python-dotenv 
 twilio
+flask
