@@ -1,70 +1,123 @@
 import streamlit as st
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from PyPDF2 import PdfReader
+import requests
+from bs4 import BeautifulSoup
 import openai
 import os
-import requests
-import subprocess
-from flask import Flask, request, jsonify
-from twilio.rest import Client
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
-from bs4 import BeautifulSoup
+from twilio.rest import Client  # type: ignore # Import Twilio Client
+import time
 
 # ----------------------
 # Load Environment Variables
 # ----------------------
 load_dotenv()
 
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
+RECEIVER_EMAIL = os.getenv("RECEIVER_EMAIL")
 openai.api_key = os.getenv("OPENAI_API_KEY")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
-USER_WHATSAPP_NUMBER = os.getenv("USER_WHATSAPP_NUMBER")
-PDF_PATH = "./Aibytec fine tuned data.pdf"
+PDF_PATH = os.getenv("PDF_PATH")
 WEBSITE_URL = os.getenv("WEBSITE_URL")
 
-# ----------------------------
-# Flask App for WhatsApp Webhook
-# ----------------------------
-app = Flask(__name__)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN =  os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER= os.getenv("TWILIO_WHATSAPP_NUMBER")
+USER_WHATSAPP_NUMBER = os.getenv("USER_WHATSAPP_NUMBER")
 
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-def send_whatsapp_message(message):
+
+# Flask API endpoints
+# API_URL_MESSAGES = os.getenv("API_URL_MESSAGES")
+# API_URL_NEW_MESSAGES = os.getenv("API_URL_NEW_MESSAGES")
+
+API_URL_LATEST_MESSAGE = "https://aibytec-bot-4da4777c8a3f.herokuapp.com/api/messages"
+API_URL_NEW_MESSAGE = "https://aibytec-bot-4da4777c8a3f.herokuapp.com/api/has_new_messages"
+
+
+# ----------------------
+# Functions
+# ----------------------
+
+def Conversation_send(message):
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     try:
-        twilio_client.messages.create(
+        client.messages.create(
             body=message,
-            from_=f'whatsapp:{TWILIO_WHATSAPP_NUMBER}',
-            to=f'whatsapp:{USER_WHATSAPP_NUMBER}'
+            from_= TWILIO_WHATSAPP_NUMBER,
+            to=USER_WHATSAPP_NUMBER
         )
+        # st.success("WhatsApp message sent successfully!")
     except Exception as e:
-        print(f"Error sending WhatsApp message: {e}")
+        st.error(f"Error sending WhatsApp message: {e}")
 
-@app.route("/webhook", methods=["POST"])
-def whatsapp_webhook():
-    incoming_message = request.form.get('Body')
-    print(f"Received message: {incoming_message}")  # Debugging line
-    
-    if incoming_message:
-        send_whatsapp_message(f"Received message: {incoming_message}")
-    
-    return jsonify({"status": "received"})
+def fetch_latest_message():
+    try:
+        response = requests.get(API_URL_LATEST_MESSAGE)
+        if response.status_code == 200:
+            latest_message = response.json()
+            return latest_message
+        else:
+            st.error(f"Error fetching the latest message: {response.status_code}")
+            return {}
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return {}
 
-# Start Flask in a separate process
-def start_flask():
-    subprocess.Popen(["flask", "run", "--host=0.0.0.0", "--port=5000"])
+# Function to check if there is a new message
+def has_new_message():
+    try:
+        response = requests.get(API_URL_NEW_MESSAGE)
+        if response.status_code == 200:
+            return response.json().get("new_message", False)
+        else:
+            return False
+    except Exception as e:
+        return False
 
-# -------------------------
-# Streamlit Chatbot Interface
-# -------------------------
+
+
+
+
+
+# Function to send email
+def send_email(name, email, contact_no, area_of_interest):
+    subject = "New User Profile Submission"
+    body = f"""
+    New Student Profile Submitted:
+
+    Name: {name}
+    Email: {email}
+    Contact No.: {contact_no}
+    Area of Interest: {area_of_interest}
+    """
+    message = MIMEMultipart()
+    message['From'] = SENDER_EMAIL
+    message['To'] = RECEIVER_EMAIL
+    message['Subject'] = subject
+    message.attach(MIMEText(body, 'plain'))
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, message.as_string())
+        server.quit()
+        st.success("Email sent successfully!")
+    except Exception as e:
+        st.error(f"Error sending email: {e}")
+
+
 # Function to extract PDF text
 def extract_pdf_text(file_path):
     try:
-        with open(file_path, "rb") as file:
-            reader = PdfReader(file)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-            return text
+        reader = PdfReader(file_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
         return ""
@@ -91,50 +144,126 @@ def chat_with_ai(user_question, website_text, pdf_text, chat_history):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=messages,
+            max_tokens=256,
+            temperature=0.7,
             stream=False
         )
         return response['choices'][0]['message']['content']
     except Exception as e:
         return f"Error generating response: {e}"
 
-# Streamlit UI
-st.set_page_config(page_title="Chatbot with WhatsApp Support", layout="wide")
+# ----------------------
+# Streamlit UI and App Logic
+# ----------------------
 
+st.set_page_config(page_title="Student Profile & AI Chatbot", layout="wide")
+
+# Session State Initialization
+if "page" not in st.session_state:
+    st.session_state['page'] = 'form'
 if "chat_history" not in st.session_state:
     st.session_state['chat_history'] = []
 
-# Display chat history
-for entry in st.session_state['chat_history']:
-    st.markdown(
-        f"""
-        <div style="background-color: #78bae4; padding: 10px; border-radius: 10px; margin-bottom: 10px;">
-            {entry['user']}
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+# ----------------------
+# PAGE 1: User Info Form
+# ----------------------
+if st.session_state['page'] == 'form':
 
-    st.markdown(
-        f"""
-        <div style="background-color:  #D3D3D3; padding: 10px; border-radius: 10px; margin-bottom: 10px;">
-            {entry['bot']}
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+    with st.form(key="user_form"):
+        name = st.text_input("Name")
+        email = st.text_input("Email")
+        contact_no = st.text_input("Contact No.")
+        area_of_interest = st.text_input("Area of Interest")
+        
+        # Create two columns for buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            submitted = st.form_submit_button("Proceed to Chat ")
+        with col2:
+            continue_chat = st.form_submit_button(" Skip and Join Chat")
+        
+        if submitted:
+            if name and email and contact_no and area_of_interest:
+                send_email(name, email, contact_no, area_of_interest)
+                st.session_state['page'] = 'chat'
+                st.rerun()
+            else:
+                st.warning("Please fill out all fields.")
+        
+        # If user clicks "Continue Chat with AIByTec"
+        if continue_chat:
+            st.session_state['page'] = 'chat'
+            st.rerun()
 
-# Load PDF and Website content once
-pdf_text = extract_pdf_text(PDF_PATH) if os.path.exists(PDF_PATH) else "PDF file not found."
-website_text = scrape_website(WEBSITE_URL)
+# ----------------------
+# PAGE 2: Chatbot Interface
+# ----------------------
+elif st.session_state['page'] == 'chat':
+    # Display chat history without headings
+    for entry in st.session_state['chat_history']:
+        # User Message
+        iconuser = "👤"
+        iconbot = "🤖"
+        st.markdown(
+            f"""
+            </div>
+            <div style='display: flex; justify-content: right; margin-bottom: 10px;'>
+            <div style='display: flex; align-items: center; max-width: 70%; 
+                        background-color: #78bae4; color:rgb(255, 255, 255); 
+                        padding: 10px; border-radius: 10px;'>
+                <span style='margin-right: 10px;'>{iconuser}</span>  <!-- Icon -->
+                <span>{entry['user']}</span>
+            </div>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
 
-user_input = st.chat_input("Type your question here...", key="user_input_fixed")
+        # Assistant Message
+        st.markdown(
+            f"""
+            </div>
+            <div style='display: flex; justify-content: left; margin-bottom: 10px;'>
+            <div style='display: flex; align-items: center; max-width: 70%; 
+                        background-color: #A9A9A9; color:rgb(255, 255, 255); 
+                        padding: 10px; border-radius: 10px;'>
+                <span style='margin-right: 10px;'>{iconbot}</span>  <!-- Icon -->
+                <span>{entry['bot']}</span>
+            </div>
+            </div>
+                
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
 
-if user_input:
-    with st.spinner("Generating response..."):
-        bot_response = chat_with_ai(user_input, website_text, pdf_text, st.session_state['chat_history'])
-    st.session_state['chat_history'].append({"user": user_input, "bot": bot_response})
-    st.rerun()
+    # Load PDF and Website content once
+    pdf_text = extract_pdf_text(PDF_PATH) if os.path.exists(PDF_PATH) else "PDF file not found."
+    website_text = scrape_website(WEBSITE_URL)
 
-# Start Flask app when the script runs
-if __name__ == "__main__":
-    start_flask()
+    # Fixed input bar at bottom
+    user_input = st.chat_input("Type your question here...", key="user_input_fixed")
+
+    if user_input:
+        temp = 0
+        # message = []
+        Conversation_send(user_input)
+        time.sleep(2) 
+        # Display bot's response
+        with st.spinner("Generating response..."):
+                # bot_response = chat_with_ai(user_input, website_text, pdf_text, st.session_state['chat_history'])
+            while temp ==0:
+                if has_new_message():
+                    latest_message = fetch_latest_message()
+                    # message = latest_message
+                    temp = 1
+                else:
+                    temp = 0
+                
+
+        # if latest_message:
+            # Append user query and bot response to chat history
+        st.session_state['chat_history'].append({"user": user_input, "bot": latest_message["body"]})
+        
+        # Re-run to display updated chat history
+        st.rerun()
